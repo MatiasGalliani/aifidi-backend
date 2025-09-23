@@ -30,12 +30,23 @@ app.use(express.json({ limit: "200kb" }));
 // CORS (si tenés front en otro dominio)
 const corsOptions = {
   origin: (origin, cb) => {
-    if (!ALLOWED_ORIGIN || !origin) return cb(null, true); // permitir en dev/local
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return cb(null, true);
+    
+    // Allow development/local requests
+    if (!ALLOWED_ORIGIN) return cb(null, true);
+    
+    // Allow the configured origin
     if (origin === ALLOWED_ORIGIN) return cb(null, true);
+    
+    // Allow www.aifidi.it specifically
+    if (origin === "https://www.aifidi.it") return cb(null, true);
+    
     return cb(new Error("Not allowed by CORS"));
   },
   methods: ["POST", "GET", "OPTIONS"],
-  allowedHeaders: ["Content-Type"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: true,
   maxAge: 600,
 };
 app.use(cors(corsOptions));
@@ -72,6 +83,11 @@ function pickListIds(bodyListIds) {
 // ====== Rutas ======
 app.get("/health", (req, res) => {
   res.json({ status: "ok", ts: new Date().toISOString() });
+});
+
+// Handle preflight requests explicitly
+app.options("/api/brevo/subscribe", (req, res) => {
+  res.status(200).end();
 });
 
 app.post("/api/brevo/subscribe", rateLimit, async (req, res) => {
