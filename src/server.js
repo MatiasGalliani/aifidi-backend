@@ -11,7 +11,7 @@ const {
   ALLOWED_ORIGIN = "",
   NODE_ENV = "production",
 
-  ZOHO_REGION = "eu", // eu | com | in | au | jp
+  ZOHO_REGION = "com", // eu | com | in | au | jp
   ZOHO_CLIENT_ID,
   ZOHO_CLIENT_SECRET,
   ZOHO_REFRESH_TOKEN,
@@ -110,7 +110,7 @@ async function getZohoAccessToken() {
   return tokenCache.access_token;
 }
 
-// Mapeo básico de atributos comunes (case-insensitive)
+// Mapeo básico de atributos comunes para Contacts (case-insensitive)
 const FIELD_MAP = {
   EMAIL: "Email",
   EMAIL_ADDRESS: "Email",
@@ -119,22 +119,22 @@ const FIELD_MAP = {
   LASTNAME: "Last_Name",
   LAST_NAME: "Last_Name",
   NAME: "Last_Name",      // si solo mandan "name", lo ponemos como Last_Name
-  COMPANY: "Company",
+  COMPANY: "Account_Name",  // En Contacts, la empresa va en Account_Name
   PHONE: "Phone",
   MOBILE: "Mobile",
   SOURCE: "Lead_Source",
   LEAD_SOURCE: "Lead_Source",
-  CITY: "City",
-  STATE: "State",
-  COUNTRY: "Country",
-  ZIP: "Zip_Code",
-  POSTAL_CODE: "Zip_Code",
+  CITY: "Mailing_City",
+  STATE: "Mailing_State",
+  COUNTRY: "Mailing_Country",
+  ZIP: "Mailing_Zip",
+  POSTAL_CODE: "Mailing_Zip",
   NOTE: "Description",
   MESSAGE: "Description",
 };
 
-// Convierte attributes a campos Zoho; lo no mapeado se adjunta en Description (JSON)
-function buildZohoLead(email, attributes = {}) {
+// Convierte attributes a campos Zoho Contact; lo no mapeado se adjunta en Description (JSON)
+function buildZohoContact(email, attributes = {}) {
   const out = {};
   const descExtra = {};
   // Campos mínimos recomendados
@@ -169,8 +169,8 @@ function buildZohoLead(email, attributes = {}) {
     if (!out.Last_Name) out.Last_Name = rest.join(" ") || first;
   }
 
-  // Si no hay Company, Zoho lo permite en Leads, pero conviene algo
-  if (!out.Company) out.Company = attributes?.company || attributes?.COMPANY || "—";
+  // Si no hay Account_Name, Zoho lo permite en Contacts, pero conviene algo
+  if (!out.Account_Name) out.Account_Name = attributes?.company || attributes?.COMPANY || "—";
 
   if (Object.keys(descExtra).length > 0) {
     const json = JSON.stringify(descExtra);
@@ -185,9 +185,17 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", ts: new Date().toISOString() });
 });
 
-app.options("/api/zoho/lead", (req, res) => res.status(200).end());
+app.get("/zoho/callback", (req, res) => {
+  const { code, state, error } = req.query;
+  if (error) return res.status(400).send(String(error));
+  // store/use `code` immediately on the server to exchange for tokens
+  res.send(`Auth code received. Copy this server log and close this tab.`);
+  console.log("ZOHO AUTH CODE:", code, "STATE:", state);
+});
 
-app.post("/api/zoho/lead", rateLimit, async (req, res) => {
+app.options("/api/zoho/contact", (req, res) => res.status(200).end());
+
+app.post("/api/zoho/contact", rateLimit, async (req, res) => {
   try {
     const { email, attributes = {}, honeypot } = req.body || {};
 
@@ -205,13 +213,13 @@ app.post("/api/zoho/lead", rateLimit, async (req, res) => {
     }
 
     // Construir record para Zoho
-    const record = buildZohoLead(email, attributes);
+    const record = buildZohoContact(email, attributes);
 
     // Access token
     const accessToken = await getZohoAccessToken();
 
     // Intento UPSERT por Email
-    const upsertUrl = `${DOMAINS.api}/crm/v2/Leads/upsert`;
+    const upsertUrl = `${DOMAINS.api}/crm/v2/Contacts/upsert`;
     const payload = {
       data: [record],
       duplicate_check_fields: ["Email"],
@@ -256,7 +264,7 @@ app.post("/api/zoho/lead", rateLimit, async (req, res) => {
 
     // Error de Zoho
     return res.status(r.status || 502).json({
-      error: "Zoho upsert failed",
+      error: "Zoho contact upsert failed",
       detail: json,
     });
   } catch (e) {
