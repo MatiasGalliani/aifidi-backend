@@ -110,34 +110,34 @@ async function getZohoAccessToken() {
   return tokenCache.access_token;
 }
 
-// Mapeo para Custom Module "AIFIDI_IT" (case-insensitive)
+// Mapeo para Contacts (temporary test)
 const FIELD_MAP = {
   // Basic fields
   EMAIL: "Email",
   EMAIL_ADDRESS: "Email",
   
   // Name fields
-  FIRSTNAME: "Nome",
-  FIRST_NAME: "Nome",
-  NOME: "Nome",
-  LASTNAME: "Cognome", 
-  LAST_NAME: "Cognome",
-  COGNOME: "Cognome",
-  NAME: "Name",         // Name field in AIFIDI_IT module
+  FIRSTNAME: "First_Name",
+  FIRST_NAME: "First_Name",
+  NOME: "First_Name",
+  LASTNAME: "Last_Name", 
+  LAST_NAME: "Last_Name",
+  COGNOME: "Last_Name",
+  NAME: "Last_Name",
   
   // Company field
-  COMPANY: "Name",
-  NOME_AZIENDA: "Name",
+  COMPANY: "Account_Name",
+  NOME_AZIENDA: "Account_Name",
   
   // Phone field
-  PHONE: "Telefono",
-  MOBILE: "Telefono",
-  TELEFONO: "Telefono",
+  PHONE: "Phone",
+  MOBILE: "Phone",
+  TELEFONO: "Phone",
   
-  // Custom fields for your module
-  SCOPO_RICHIESTA: "SCOPO_FINANZIAMENTO",
-  SCOPO_FINANZIAMENTO: "SCOPO_FINANZIAMENTO",
-  IMPORTO_RICHIESTO: "IMPORTO_RICHIESTO",
+  // Custom fields (will go to description)
+  SCOPO_RICHIESTA: "Description",
+  SCOPO_FINANZIAMENTO: "Description",
+  IMPORTO_RICHIESTO: "Description",
   
   // Additional fields (will go to description if not mapped)
   CITTA_RESIDENZA: "Description",
@@ -231,8 +231,8 @@ app.post("/api/zoho/contact", rateLimit, async (req, res) => {
     // Access token
     const accessToken = await getZohoAccessToken();
 
-    // Intento UPSERT por Email - Custom Module "AIFIDI_IT"
-    const upsertUrl = `${DOMAINS.api}/crm/v2/AIFIDI_IT/upsert`;
+    // Intento UPSERT por Email - Test with Contacts first
+    const upsertUrl = `${DOMAINS.api}/crm/v2/Contacts/upsert`;
     const payload = {
       data: [record],
       duplicate_check_fields: ["Email"],
