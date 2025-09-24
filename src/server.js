@@ -3,45 +3,50 @@ import cors from "cors";
 import helmet from "helmet";
 import dotenv from "dotenv";
 
-// Load environment variables from .env file
 dotenv.config();
 
 // ====== Config ======
 const {
   PORT = 3000,
-  BREVO_API_KEY,
-  BREVO_LIST_ID,             // opcional si querés fijar la lista desde el backend
-  ALLOWED_ORIGIN = "",       // ej: https://tu-landing.com
+  ALLOWED_ORIGIN = "",
   NODE_ENV = "production",
+
+  ZOHO_REGION = "eu", // eu | com | in | au | jp
+  ZOHO_CLIENT_ID,
+  ZOHO_CLIENT_SECRET,
+  ZOHO_REFRESH_TOKEN,
+
+  DEFAULT_LEAD_SOURCE = "Landing Website",
 } = process.env;
 
-if (!BREVO_API_KEY) {
-  console.error("Falta BREVO_API_KEY en variables de entorno");
+const REGION_DOMAINS = {
+  eu: { accounts: "https://accounts.zoho.eu", api: "https://www.zohoapis.eu" },
+  com: { accounts: "https://accounts.zoho.com", api: "https://www.zohoapis.com" },
+  in: { accounts: "https://accounts.zoho.in", api: "https://www.zohoapis.in" },
+  au: { accounts: "https://accounts.zoho.com.au", api: "https://www.zohoapis.com.au" },
+  jp: { accounts: "https://accounts.zoho.jp", api: "https://www.zohoapis.jp" },
+};
+
+const DOMAINS = REGION_DOMAINS[ZOHO_REGION] || REGION_DOMAINS.eu;
+
+if (!ZOHO_CLIENT_ID || !ZOHO_CLIENT_SECRET || !ZOHO_REFRESH_TOKEN) {
+  console.error("Faltan variables ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET o ZOHO_REFRESH_TOKEN");
   process.exit(1);
 }
 
 // ====== App ======
 const app = express();
-app.set("trust proxy", true); // para obtener IP real detrás de proxy (Railway)
-
+app.set("trust proxy", true);
 app.use(helmet());
 app.use(express.json({ limit: "200kb" }));
 
-// CORS (si tenés front en otro dominio)
+// ====== CORS ======
 const corsOptions = {
   origin: (origin, cb) => {
-    // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return cb(null, true);
-    
-    // Allow development/local requests
     if (!ALLOWED_ORIGIN) return cb(null, true);
-    
-    // Allow the configured origin
     if (origin === ALLOWED_ORIGIN) return cb(null, true);
-    
-    // Allow www.aifidi.it specifically
     if (origin === "https://www.aifidi.it") return cb(null, true);
-    
     return cb(new Error("Not allowed by CORS"));
   },
   methods: ["POST", "GET", "OPTIONS"],
@@ -51,12 +56,12 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 
-// ====== Rate limit MUY básico en memoria ======
-const windowMs = 60 * 1000;     // 1 min
-const maxPerWindow = 30;         // 30 req/min por IP
+// ====== Rate limit básico ======
+const windowMs = 60 * 1000;
+const maxPerWindow = 30;
 const hits = new Map();
 function rateLimit(req, res, next) {
-  const ip = req.ip || req.headers["x-forwarded-for"] || req.connection.remoteAddress;
+  const ip = req.ip || req.headers["x-forwarded-for"] || req.connection?.remoteAddress;
   const now = Date.now();
   const rec = hits.get(ip) || { count: 0, start: now };
   if (now - rec.start > windowMs) {
@@ -74,10 +79,105 @@ function rateLimit(req, res, next) {
 // ====== Utils ======
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function pickListIds(bodyListIds) {
-  if (Array.isArray(bodyListIds) && bodyListIds.length > 0) return bodyListIds;
-  if (BREVO_LIST_ID) return [Number(BREVO_LIST_ID)];
-  return undefined; // Brevo permite omitir listIds si solo quieres upsert sin lista
+// cache de access token en memoria
+let tokenCache = { access_token: null, expires_at: 0 };
+
+async function getZohoAccessToken() {
+  const now = Date.now();
+  if (tokenCache.access_token && now < tokenCache.expires_at - 15_000) {
+    return tokenCache.access_token;
+  }
+  const params = new URLSearchParams({
+    refresh_token: ZOHO_REFRESH_TOKEN,
+    client_id: ZOHO_CLIENT_ID,
+    client_secret: ZOHO_CLIENT_SECRET,
+    grant_type: "refresh_token",
+  });
+  const resp = await fetch(`${DOMAINS.accounts}/oauth/v2/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: params.toString(),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`Zoho token error: ${resp.status} ${text}`);
+  }
+  const data = await resp.json();
+  tokenCache = {
+    access_token: data.access_token,
+    expires_at: Date.now() + (data.expires_in ? data.expires_in * 1000 : 3_000_000),
+  };
+  return tokenCache.access_token;
+}
+
+// Mapeo básico de atributos comunes (case-insensitive)
+const FIELD_MAP = {
+  EMAIL: "Email",
+  EMAIL_ADDRESS: "Email",
+  FIRSTNAME: "First_Name",
+  FIRST_NAME: "First_Name",
+  LASTNAME: "Last_Name",
+  LAST_NAME: "Last_Name",
+  NAME: "Last_Name",      // si solo mandan "name", lo ponemos como Last_Name
+  COMPANY: "Company",
+  PHONE: "Phone",
+  MOBILE: "Mobile",
+  SOURCE: "Lead_Source",
+  LEAD_SOURCE: "Lead_Source",
+  CITY: "City",
+  STATE: "State",
+  COUNTRY: "Country",
+  ZIP: "Zip_Code",
+  POSTAL_CODE: "Zip_Code",
+  NOTE: "Description",
+  MESSAGE: "Description",
+};
+
+// Convierte attributes a campos Zoho; lo no mapeado se adjunta en Description (JSON)
+function buildZohoLead(email, attributes = {}) {
+  const out = {};
+  const descExtra = {};
+  // Campos mínimos recomendados
+  out.Email = email;
+
+  // Fuente por defecto
+  if (DEFAULT_LEAD_SOURCE) out.Lead_Source = DEFAULT_LEAD_SOURCE;
+
+  // Mapeo
+  for (const [k, v] of Object.entries(attributes || {})) {
+    if (v == null) continue;
+    const key = String(k).trim();
+    const upper = key.toUpperCase();
+    const apiField = FIELD_MAP[upper];
+    if (apiField) {
+      if (apiField === "Description") {
+        out.Description = [out.Description, String(v)].filter(Boolean).join("\n");
+      } else {
+        out[apiField] = v;
+      }
+    } else {
+      // acumular para Description
+      descExtra[key] = v;
+    }
+  }
+
+  // Si nos mandaron un "full name", intentar partirlo
+  if (!out.Last_Name && (attributes?.name || attributes?.NAME)) {
+    const full = String(attributes.name || attributes.NAME).trim();
+    const [first, ...rest] = full.split(/\s+/);
+    if (!out.First_Name) out.First_Name = first;
+    if (!out.Last_Name) out.Last_Name = rest.join(" ") || first;
+  }
+
+  // Si no hay Company, Zoho lo permite en Leads, pero conviene algo
+  if (!out.Company) out.Company = attributes?.company || attributes?.COMPANY || "—";
+
+  if (Object.keys(descExtra).length > 0) {
+    const json = JSON.stringify(descExtra);
+    out.Description = [out.Description, `\n[extra]\n${json}`].filter(Boolean).join("");
+  }
+
+  return out;
 }
 
 // ====== Rutas ======
@@ -85,103 +185,79 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", ts: new Date().toISOString() });
 });
 
-// Handle preflight requests explicitly
-app.options("/api/brevo/subscribe", (req, res) => {
-  res.status(200).end();
-});
+app.options("/api/zoho/lead", (req, res) => res.status(200).end());
 
-app.post("/api/brevo/subscribe", rateLimit, async (req, res) => {
+app.post("/api/zoho/lead", rateLimit, async (req, res) => {
   try {
-    const {
-      email,
-      attributes = {},
-      listIds: bodyListIds,
-      honeypot, // opcional: si viene con valor, rechazamos
-    } = req.body || {};
+    const { email, attributes = {}, honeypot } = req.body || {};
 
-    // Anti-bot honeypot
+    // Anti-bot
     if (honeypot && String(honeypot).trim() !== "") {
       return res.status(400).json({ error: "Bad request" });
     }
 
-    // Validaciones mínimas
+    // Validaciones
     if (!email || !emailRegex.test(String(email))) {
       return res.status(400).json({ error: "Email inválido" });
     }
-
-    // Asegurar que los atributos son un objeto plano
     if (typeof attributes !== "object" || Array.isArray(attributes)) {
       return res.status(400).json({ error: "attributes debe ser un objeto" });
     }
 
-    // Forzar EMAIL en attributes si nos lo mandan
-    if (!attributes.EMAIL) attributes.EMAIL = email;
+    // Construir record para Zoho
+    const record = buildZohoLead(email, attributes);
 
-    // Determinar lista destino (del body o del env)
-    const listIds = pickListIds(bodyListIds);
+    // Access token
+    const accessToken = await getZohoAccessToken();
 
-    // Payload a Brevo (POST upsert)
-    const brevoBody = {
-      email,
-      attributes,
-      updateEnabled: true,
-      ...(listIds ? { listIds } : {}),
+    // Intento UPSERT por Email
+    const upsertUrl = `${DOMAINS.api}/crm/v2/Leads/upsert`;
+    const payload = {
+      data: [record],
+      duplicate_check_fields: ["Email"],
+      trigger: ["workflow"], // dispara workflows/reglas si las tienes
     };
 
-    const r = await fetch("https://api.brevo.com/v3/contacts", {
+    let r = await fetch(upsertUrl, {
       method: "POST",
       headers: {
+        Authorization: `Zoho-oauthtoken ${accessToken}`,
         "Content-Type": "application/json",
-        "api-key": BREVO_API_KEY,
-        "accept": "application/json",
+        Accept: "application/json",
       },
-      body: JSON.stringify(brevoBody),
+      body: JSON.stringify(payload),
     });
 
+    // Si el access token expiró justo ahora, reintentar una vez
+    if (r.status === 401) {
+      tokenCache = { access_token: null, expires_at: 0 };
+      const newToken = await getZohoAccessToken();
+      r = await fetch(upsertUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Zoho-oauthtoken ${newToken}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+    }
+
+    const text = await r.text();
+    let json;
+    try { json = JSON.parse(text); } catch { json = { raw: text }; }
+
     if (r.ok) {
-      return res.status(200).json({ ok: true });
+      // Zoho responde con detalles por registro: status, code, details.id, action (insert/update)
+      const details = json?.data?.[0] || {};
+      const action = details?.action || details?.code || "ok";
+      return res.status(200).json({ ok: true, action, zoho: details });
     }
 
-    // Si falla, intentamos leer el error
-    const err = await r.json().catch(() => ({}));
-
-    // Si ya existe el contacto o similar, hacemos PUT para actualizar
-    const isDuplicate =
-      r.status === 400 &&
-      (err?.code === "duplicate_parameter" ||
-        (err?.message || "").toLowerCase().includes("already exists"));
-
-    if (isDuplicate) {
-      const putBody = {
-        attributes,
-        ...(listIds ? { listIds } : {}),
-      };
-
-      const put = await fetch(
-        `https://api.brevo.com/v3/contacts/${encodeURIComponent(email)}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            "api-key": BREVO_API_KEY,
-            "accept": "application/json",
-          },
-          body: JSON.stringify(putBody),
-        }
-      );
-
-      if (put.ok) {
-        return res.status(200).json({ ok: true, updated: true });
-      }
-
-      const e2 = await put.text().catch(() => "");
-      return res.status(502).json({ error: "Brevo update failed", detail: e2 });
-    }
-
-    // Otro error
+    // Error de Zoho
     return res.status(r.status || 502).json({
-      error: "Brevo create failed",
-      detail: err || (await r.text().catch(() => "")),
+      error: "Zoho upsert failed",
+      detail: json,
     });
   } catch (e) {
     console.error("Internal error:", e);
@@ -191,5 +267,5 @@ app.post("/api/brevo/subscribe", rateLimit, async (req, res) => {
 
 // ====== Arranque ======
 app.listen(PORT, () => {
-  console.log(`Brevo mini backend escuchando en :${PORT} (${NODE_ENV})`);
+  console.log(`Zoho mini backend escuchando en :${PORT} (${NODE_ENV})`);
 });
