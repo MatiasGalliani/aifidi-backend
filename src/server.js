@@ -110,38 +110,51 @@ async function getZohoAccessToken() {
   return tokenCache.access_token;
 }
 
-// Mapeo básico de atributos comunes para Contacts (case-insensitive)
+// Mapeo para Custom Module "AIFIDI_IT" (case-insensitive)
 const FIELD_MAP = {
+  // Basic fields
   EMAIL: "Email",
   EMAIL_ADDRESS: "Email",
-  FIRSTNAME: "First_Name",
-  FIRST_NAME: "First_Name",
-  LASTNAME: "Last_Name",
-  LAST_NAME: "Last_Name",
-  NAME: "Last_Name",      // si solo mandan "name", lo ponemos como Last_Name
-  COMPANY: "Account_Name",  // En Contacts, la empresa va en Account_Name
-  PHONE: "Phone",
-  MOBILE: "Mobile",
-  SOURCE: "Lead_Source",
-  LEAD_SOURCE: "Lead_Source",
-  CITY: "Mailing_City",
-  STATE: "Mailing_State",
-  COUNTRY: "Mailing_Country",
-  ZIP: "Mailing_Zip",
-  POSTAL_CODE: "Mailing_Zip",
+  
+  // Name fields
+  FIRSTNAME: "Nome",
+  FIRST_NAME: "Nome",
+  NOME: "Nome",
+  LASTNAME: "Cognome", 
+  LAST_NAME: "Cognome",
+  COGNOME: "Cognome",
+  NAME: "Name",         // Name field in AIFIDI_IT module
+  
+  // Company field
+  COMPANY: "Name",
+  NOME_AZIENDA: "Name",
+  
+  // Phone field
+  PHONE: "Telefono",
+  MOBILE: "Telefono",
+  TELEFONO: "Telefono",
+  
+  // Custom fields for your module
+  SCOPO_RICHIESTA: "SCOPO_FINANZIAMENTO",
+  SCOPO_FINANZIAMENTO: "SCOPO_FINANZIAMENTO",
+  IMPORTO_RICHIESTO: "IMPORTO_RICHIESTO",
+  
+  // Additional fields (will go to description if not mapped)
+  CITTA_RESIDENZA: "Description",
+  CITTA_SEDE_LEGALE: "Description",
+  CITTA_SEDE_OPERATIVA: "Description",
+  SOURCE: "Description",
+  LEAD_SOURCE: "Description",
   NOTE: "Description",
   MESSAGE: "Description",
 };
 
-// Convierte attributes a campos Zoho Contact; lo no mapeado se adjunta en Description (JSON)
+// Convierte attributes a campos Zoho Custom Module; lo no mapeado se adjunta en Description (JSON)
 function buildZohoContact(email, attributes = {}) {
   const out = {};
   const descExtra = {};
   // Campos mínimos recomendados
   out.Email = email;
-
-  // Fuente por defecto
-  if (DEFAULT_LEAD_SOURCE) out.Lead_Source = DEFAULT_LEAD_SOURCE;
 
   // Mapeo
   for (const [k, v] of Object.entries(attributes || {})) {
@@ -162,15 +175,15 @@ function buildZohoContact(email, attributes = {}) {
   }
 
   // Si nos mandaron un "full name", intentar partirlo
-  if (!out.Last_Name && (attributes?.name || attributes?.NAME)) {
+  if (!out.Cognome && (attributes?.name || attributes?.NAME)) {
     const full = String(attributes.name || attributes.NAME).trim();
     const [first, ...rest] = full.split(/\s+/);
-    if (!out.First_Name) out.First_Name = first;
-    if (!out.Last_Name) out.Last_Name = rest.join(" ") || first;
+    if (!out.Nome) out.Nome = first;
+    if (!out.Cognome) out.Cognome = rest.join(" ") || first;
   }
 
-  // Si no hay Account_Name, Zoho lo permite en Contacts, pero conviene algo
-  if (!out.Account_Name) out.Account_Name = attributes?.company || attributes?.COMPANY || "—";
+  // Si no hay Name, asignar valor por defecto
+  if (!out.Name) out.Name = attributes?.company || attributes?.COMPANY || "—";
 
   if (Object.keys(descExtra).length > 0) {
     const json = JSON.stringify(descExtra);
@@ -194,7 +207,6 @@ app.get("/zoho/callback", (req, res) => {
 });
 
 app.options("/api/zoho/contact", (req, res) => res.status(200).end());
-app.options("/api/zoho/lead", (req, res) => res.status(200).end());
 
 app.post("/api/zoho/contact", rateLimit, async (req, res) => {
   try {
@@ -219,8 +231,8 @@ app.post("/api/zoho/contact", rateLimit, async (req, res) => {
     // Access token
     const accessToken = await getZohoAccessToken();
 
-    // Intento UPSERT por Email
-    const upsertUrl = `${DOMAINS.api}/crm/v2/Contacts/upsert`;
+    // Intento UPSERT por Email - Custom Module "AIFIDI_IT"
+    const upsertUrl = `${DOMAINS.api}/crm/v2/AIFIDI_IT/upsert`;
     const payload = {
       data: [record],
       duplicate_check_fields: ["Email"],
@@ -266,85 +278,6 @@ app.post("/api/zoho/contact", rateLimit, async (req, res) => {
     // Error de Zoho
     return res.status(r.status || 502).json({
       error: "Zoho contact upsert failed",
-      detail: json,
-    });
-  } catch (e) {
-    console.error("Internal error:", e);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// ====== Lead endpoint (alias for contact) ======
-app.post("/api/zoho/lead", rateLimit, async (req, res) => {
-  try {
-    const { email, attributes = {}, honeypot } = req.body || {};
-
-    // Anti-bot
-    if (honeypot && String(honeypot).trim() !== "") {
-      return res.status(400).json({ error: "Bad request" });
-    }
-
-    // Validaciones
-    if (!email || !emailRegex.test(String(email))) {
-      return res.status(400).json({ error: "Email inválido" });
-    }
-    if (typeof attributes !== "object" || Array.isArray(attributes)) {
-      return res.status(400).json({ error: "attributes debe ser un objeto" });
-    }
-
-    // Construir record para Zoho
-    const record = buildZohoContact(email, attributes);
-
-    // Access token
-    const accessToken = await getZohoAccessToken();
-
-    // Intento UPSERT por Email
-    const upsertUrl = `${DOMAINS.api}/crm/v2/Contacts/upsert`;
-    const payload = {
-      data: [record],
-      duplicate_check_fields: ["Email"],
-      trigger: ["workflow"], // dispara workflows/reglas si las tienes
-    };
-
-    let r = await fetch(upsertUrl, {
-      method: "POST",
-      headers: {
-        Authorization: `Zoho-oauthtoken ${accessToken}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-
-    // Si el access token expiró justo ahora, reintentar una vez
-    if (r.status === 401) {
-      tokenCache = { access_token: null, expires_at: 0 };
-      const newToken = await getZohoAccessToken();
-      r = await fetch(upsertUrl, {
-        method: "POST",
-        headers: {
-          Authorization: `Zoho-oauthtoken ${newToken}`,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify(payload),
-      });
-    }
-
-    const text = await r.text();
-    let json;
-    try { json = JSON.parse(text); } catch { json = { raw: text }; }
-
-    if (r.ok) {
-      // Zoho responde con detalles por registro: status, code, details.id, action (insert/update)
-      const details = json?.data?.[0] || {};
-      const action = details?.action || details?.code || "ok";
-      return res.status(200).json({ ok: true, action, zoho: details });
-    }
-
-    // Error de Zoho
-    return res.status(r.status || 502).json({
-      error: "Zoho lead upsert failed",
       detail: json,
     });
   } catch (e) {
