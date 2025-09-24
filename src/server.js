@@ -194,6 +194,7 @@ app.get("/zoho/callback", (req, res) => {
 });
 
 app.options("/api/zoho/contact", (req, res) => res.status(200).end());
+app.options("/api/zoho/lead", (req, res) => res.status(200).end());
 
 app.post("/api/zoho/contact", rateLimit, async (req, res) => {
   try {
@@ -265,6 +266,85 @@ app.post("/api/zoho/contact", rateLimit, async (req, res) => {
     // Error de Zoho
     return res.status(r.status || 502).json({
       error: "Zoho contact upsert failed",
+      detail: json,
+    });
+  } catch (e) {
+    console.error("Internal error:", e);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ====== Lead endpoint (alias for contact) ======
+app.post("/api/zoho/lead", rateLimit, async (req, res) => {
+  try {
+    const { email, attributes = {}, honeypot } = req.body || {};
+
+    // Anti-bot
+    if (honeypot && String(honeypot).trim() !== "") {
+      return res.status(400).json({ error: "Bad request" });
+    }
+
+    // Validaciones
+    if (!email || !emailRegex.test(String(email))) {
+      return res.status(400).json({ error: "Email inválido" });
+    }
+    if (typeof attributes !== "object" || Array.isArray(attributes)) {
+      return res.status(400).json({ error: "attributes debe ser un objeto" });
+    }
+
+    // Construir record para Zoho
+    const record = buildZohoContact(email, attributes);
+
+    // Access token
+    const accessToken = await getZohoAccessToken();
+
+    // Intento UPSERT por Email
+    const upsertUrl = `${DOMAINS.api}/crm/v2/Contacts/upsert`;
+    const payload = {
+      data: [record],
+      duplicate_check_fields: ["Email"],
+      trigger: ["workflow"], // dispara workflows/reglas si las tienes
+    };
+
+    let r = await fetch(upsertUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Zoho-oauthtoken ${accessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    // Si el access token expiró justo ahora, reintentar una vez
+    if (r.status === 401) {
+      tokenCache = { access_token: null, expires_at: 0 };
+      const newToken = await getZohoAccessToken();
+      r = await fetch(upsertUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Zoho-oauthtoken ${newToken}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+    }
+
+    const text = await r.text();
+    let json;
+    try { json = JSON.parse(text); } catch { json = { raw: text }; }
+
+    if (r.ok) {
+      // Zoho responde con detalles por registro: status, code, details.id, action (insert/update)
+      const details = json?.data?.[0] || {};
+      const action = details?.action || details?.code || "ok";
+      return res.status(200).json({ ok: true, action, zoho: details });
+    }
+
+    // Error de Zoho
+    return res.status(r.status || 502).json({
+      error: "Zoho lead upsert failed",
       detail: json,
     });
   } catch (e) {
